@@ -24,6 +24,12 @@ class CVEdb():
     MODIFIED_META = BASE_URL.format(when="modified", ext="meta")
     MODIFIED_JSON_GZ = JSON_GZ.format(when="modified")
 
+    # Some strings to ease slicing the dataframes
+    CVE_DESC = "cve.description.description_data"
+    CVE_ITEMS = "CVE_Items"
+    CVE_NUM = "CVE_data_numberOfCVEs"
+    CVE_ID = "cve.CVE_data_meta.ID"
+
     last_modified = None
 
     def __init__(self, dbfile, update_delay):
@@ -112,17 +118,17 @@ class CVEdb():
         # will convert the column into its own dataframe then join it
         # to the side of the original
         frame = pandas.read_json(data)
-        frame = frame.join(pandas.json_normalize(frame['CVE_Items']))
+        frame = frame.join(pandas.json_normalize(frame[self.CVE_ITEMS]))
 
         # Since the data is now stored elsewhere we can safely delete the
         # column to save memory
-        del frame['CVE_Items']
+        del frame[self.CVE_ITEMS]
 
         # Since NIST distributes chunks of CVEs in yearly and modified formats,
         # this would contain the number of CVEs in whichever chunk was
         # distributed. We aggregate everything into one structure, so it's
         # useless.
-        del frame['CVE_data_numberOfCVEs']
+        del frame[self.CVE_NUM]
 
         # This description column is strangely full of single-element JSON
         # lists, and pandas won't normalize JSON arrays:
@@ -137,13 +143,11 @@ class CVEdb():
         # https://csrc.nist.gov/schema/nvd/feed/1.1/nvd_cve_feed_json_1.1.schema
         #
         # FIXME: We'll just use the first one for now.
-        frame['cve.description.description_data'] = \
-            frame['cve.description.description_data'].transform(lambda x: x[0])
-        frame = frame.join(pandas.json_normalize(
-            frame['cve.description.description_data']))
+        frame[self.CVE_DESC] = frame[self.CVE_DESC].transform(lambda x: x[0])
+        frame = frame.join(pandas.json_normalize(frame[self.CVE_DESC]))
 
         # As before, safe to delete
-        del frame['cve.description.description_data']
+        del frame[self.CVE_DESC]
 
         # At last categorize columns for memory
         self._categorize(frame)
@@ -168,9 +172,6 @@ class CVEdb():
 
         tprint("CVE db now at length {} after adding {} CVEs".format(
             len(self.cve_df.index), len(frame.index)))
-
-        # Note that cve.CVE_data_meta.ID is the CVE ID,
-        # cve.description.description_data is description
 
     def _update(self):
         tprint("Attempting to update db")
@@ -205,22 +206,19 @@ class CVEdb():
         self.update_from_json(self._gz_data(urlfile))
 
     def update_loop(self, event):
-        try:
-            while True:
-                when = datetime.now()
-                self._update()
-                self.save()
-                # This probably isn't as good at avoiding skew as it could be
-                if (event.wait(self.update_delay -
-                               (datetime.now() - when).total_seconds())):
-                    # event.wait returns true IFF flag is true with event.set()
-                    # Here, that means we need to exit
-                    return
-        except KeyboardInterrupt:
-            pass
+        while True:
+            when = datetime.now()
+            self._update()
+            self.save()
+            # This probably isn't as good at avoiding skew as it could be
+            if (event.wait(self.update_delay -
+                           (datetime.now() - when).total_seconds())):
+                # event.wait returns true IFF flag is true with event.set()
+                # Here, that means we need to exit
+                return
 
     def get_cve_json(self, cve):
-        row = self.cve_df[self.cve_df['cve.CVE_data_meta.ID'] == cve]
+        row = self.cve_df[self.cve_df[self.CVE_ID] == cve]
         return row.to_json()
 
     def save(self):
