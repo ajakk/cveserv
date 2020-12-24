@@ -38,7 +38,7 @@ class CVEdb():
             sys.exit(-1)
         else:
             tprint("First run, will fetch all data")
-            self.first_fetch()
+            self._first_fetch()
 
     @staticmethod
     def _gz_data(gz_file):
@@ -49,27 +49,17 @@ class CVEdb():
     def _get_urldata(url):
         return requests.get(url).content
 
-    def first_fetch(self):
+    def _first_fetch(self):
         for year in range(2002, datetime.now().year + 1):
             tprint("Fetching year {}".format(year))
 
-            filename = "{}.gz".format(year)
+            urldata = self._get_urldata(self.JSON_GZ.format(when=year))
+            gz_string = self._gz_data(io.BytesIO(urldata))
 
-            if os.path.isfile(filename):
-                self.update_from_json(self._gz_data(filename),
-                                      merge=False)
-            else:
-                urldata = self._get_urldata(self.JSON_GZ.format(when=year))
-                gz_string = self._gz_data(io.BytesIO(urldata))
-
-                with open(filename, "wb") as gzfile:
-                    gzfile.write(gz_string)
-                    tprint("Wrote {}".format(filename))
-                self.update_from_json(io.BytesIO(gz_string), merge=False)
-
+            self.update_from_json(io.BytesIO(gz_string), merge=False)
 
     @staticmethod
-    def _categorize(df):
+    def _categorize(frame):
         cols = ['CVE_data_type', 'CVE_data_format', 'CVE_data_version',
                 'CVE_data_timestamp', 'cve.data_type', 'cve.data_format',
                 'cve.data_version', 'cve.CVE_data_meta.ASSIGNER',
@@ -109,7 +99,7 @@ class CVEdb():
 
         # Use categorical types for certain columns for less memory usage
         for col in cols:
-            df[col] = pandas.Categorical(df[col])
+            frame[col] = pandas.Categorical(frame[col])
 
     def update_from_json(self, data, merge=True):
         """
@@ -121,18 +111,18 @@ class CVEdb():
         # read_json will produce a CVE_Items column of nested JSON data so we
         # will convert the column into its own dataframe then join it
         # to the side of the original
-        df = pandas.read_json(data)
-        df = df.join(pandas.json_normalize(df['CVE_Items']))
+        frame = pandas.read_json(data)
+        frame = frame.join(pandas.json_normalize(frame['CVE_Items']))
 
         # Since the data is now stored elsewhere we can safely delete the
         # column to save memory
-        del df['CVE_Items']
+        del frame['CVE_Items']
 
         # Since NIST distributes chunks of CVEs in yearly and modified formats,
         # this would contain the number of CVEs in whichever chunk was
         # distributed. We aggregate everything into one structure, so it's
         # useless.
-        del df['CVE_data_numberOfCVEs']
+        del frame['CVE_data_numberOfCVEs']
 
         # This description column is strangely full of single-element JSON
         # lists, and pandas won't normalize JSON arrays:
@@ -147,16 +137,16 @@ class CVEdb():
         # https://csrc.nist.gov/schema/nvd/feed/1.1/nvd_cve_feed_json_1.1.schema
         #
         # FIXME: We'll just use the first one for now.
-        df['cve.description.description_data'] = \
-            df['cve.description.description_data'].transform(lambda x: x[0])
-        df = df.join(pandas.json_normalize(
-            df['cve.description.description_data']))
+        frame['cve.description.description_data'] = \
+            frame['cve.description.description_data'].transform(lambda x: x[0])
+        frame = frame.join(pandas.json_normalize(
+            frame['cve.description.description_data']))
 
         # As before, safe to delete
-        del df['cve.description.description_data']
+        del frame['cve.description.description_data']
 
         # At last categorize columns for memory
-        self._categorize(df)
+        self._categorize(frame)
 
         # TODO: The dataframes can be optimized for memory quite a bit
         # TODO: At some point data with slashes in them get escaped, / -> \/.
@@ -165,24 +155,24 @@ class CVEdb():
         # And then we add it to the running class dataframe or replace the
         # empty one created as a placeholder
         if self.cve_df.empty:
-            self.cve_df = df
+            self.cve_df = frame
         else:
             start_time = time.time()
             if merge:
-                self.cve_df = self.cve_df.append(df, ignore_index=True)
+                self.cve_df = self.cve_df.append(frame, ignore_index=True)
                 self.cve_df = self.cve_df.drop_duplicates(
                         subset='cve.CVE_data_meta.ID', keep='last')
             else:
-                self.cve_df = self.cve_df.append(df, ignore_index=True)
+                self.cve_df = self.cve_df.append(frame, ignore_index=True)
             tprint("That took {} seconds".format(time.time() - start_time))
 
         tprint("CVE db now at length {} after adding {} CVEs".format(
-            len(self.cve_df.index), len(df.index)))
+            len(self.cve_df.index), len(frame.index)))
 
         # Note that cve.CVE_data_meta.ID is the CVE ID,
         # cve.description.description_data is description
 
-    def update(self):
+    def _update(self):
         tprint("Attempting to update db")
 
         # The modified feed has a metadata file with a timestamp that we check
@@ -218,7 +208,7 @@ class CVEdb():
         try:
             while True:
                 when = datetime.now()
-                self.update()
+                self._update()
                 self.save()
                 # This probably isn't as good at avoiding skew as it could be
                 if (event.wait(self.update_delay -
@@ -270,7 +260,7 @@ if __name__ == "__main__":
     # day. This is a more than reasonable update period anyway.
     times_per_day = (60*60*24/args.delay)
 
-    if (times_per_day > 100):
+    if times_per_day > 100:
         tprint("Refusing to send more than 200 requests per day.")
         tprint("Maximum requests per day with period of {} seconds: {}".format(
             args.delay, int(times_per_day)))
