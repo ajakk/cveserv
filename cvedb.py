@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from threading import Thread, Event
+from threading import Event, Lock, Thread
 import argparse
 import gzip
 import io
@@ -32,7 +32,9 @@ class CVEdb():
 
     last_modified = None
 
-    def __init__(self, dbfile, update_delay):
+    def __init__(self, dbfile, lock, update_delay):
+        self.cve_df = pandas.DataFrame()
+        self.lock = lock
         self.dbfile = dbfile
         self.update_delay = update_delay
 
@@ -105,7 +107,14 @@ class CVEdb():
 
         # Use categorical types for certain columns for less memory usage
         for col in cols:
-            frame[col] = pandas.Categorical(frame[col])
+            try:
+                frame[col] = pandas.Categorical(frame[col])
+            except KeyError:
+                # Certain fields will only be full if the CVE has been
+                # analyzed, like impact fields. Only raise the error if not on
+                # one of those columns.
+                if not col.startswith('impact'):
+                    raise
 
     def update_from_json(self, data, merge=True):
         """
@@ -170,6 +179,7 @@ class CVEdb():
                 self.cve_df = self.cve_df.append(frame, ignore_index=True)
             tprint("That took {} seconds".format(time.time() - start_time))
 
+        # TODO: Would be nice to know how many are added/modified here, too
         tprint("CVE db now at length {} after adding {} CVEs".format(
             len(self.cve_df.index), len(frame.index)))
 
@@ -203,7 +213,14 @@ class CVEdb():
         self.last_modified = modified_at
 
         urlfile = io.BytesIO(self._get_urldata(self.MODIFIED_JSON_GZ))
+
+        # TODO: this can probably be done quicker by creating a copy of the
+        # dataframe and then setting self.cve_df to it later (and thus
+        # minimizing downtime of the HTTP server due to locking. Can't test
+        # right away due to memory considerations
+        self.lock.acquire()
         self.update_from_json(self._gz_data(urlfile))
+        self.lock.release()
 
     def update_loop(self, event):
         while True:
@@ -218,8 +235,11 @@ class CVEdb():
                 return
 
     def get_cve_json(self, cve):
+        self.lock.acquire()
         row = self.cve_df[self.cve_df[self.CVE_ID] == cve]
-        return row.to_json()
+        data_json = row.to_json()
+        self.lock.release()
+        return data_json
 
     def save(self):
         tprint("Saving pickle to {}".format(self.dbfile))
@@ -267,7 +287,7 @@ if __name__ == "__main__":
 
     tprint("Will update ~{} times per hour".format((60*60)/args.delay))
 
-    cvedb = CVEdb(args.dbfile, args.delay)
+    cvedb = CVEdb(args.dbfile, Lock(), args.delay)
     e = Event()
     updateProcess = Thread(target=cvedb.update_loop, args=(e,))
     updateProcess.start()
